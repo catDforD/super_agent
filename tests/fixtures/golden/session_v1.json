@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "thread": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      },
+      {
+        "role": "assistant",
+        "content": "Hi"
+      }
+    ]
+  }
+}

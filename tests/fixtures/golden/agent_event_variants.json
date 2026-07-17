@@ -1,0 +1,77 @@
+{
+  "warning": {
+    "type": "warning",
+    "data": "mcp server docs: failed to start"
+  },
+  "text_delta": {
+    "type": "text_delta",
+    "data": "Hel"
+  },
+  "agent_message": {
+    "type": "agent_message",
+    "data": "Hello"
+  },
+  "tool_call_started": {
+    "type": "tool_call_started",
+    "data": {
+      "id": "call_1",
+      "name": "apply_patch"
+    }
+  },
+  "approval_requested_file_changes": {
+    "type": "approval_requested",
+    "data": {
+      "id": "approval-call_1",
+      "action": {
+        "kind": "file_changes",
+        "files": [
+          {
+            "path": "src/lib.py",
+            "operation": "update",
+            "replacements": 2,
+            "created": false,
+            "overwritten": true,
+            "deleted": false
+          }
+        ],
+        "diff": "--- src/lib.py\n+++ src/lib.py\n@@\n-old\n+new\n"
+      },
+      "reason": "file changes require approval"
+    }
+  },
+  "approval_resolved_denied": {
+    "type": "approval_resolved",
+    "data": {
+      "request_id": "approval-call_1",
+      "approved": false
+    }
+  },
+  "tool_call_finished_with_summary": {
+    "type": "tool_call_finished",
+    "data": {
+      "id": "call_1",
+      "name": "apply_patch",
+      "ok": true,
+      "summary": {
+        "files": [
+          {
+            "path": "src/lib.py",
+            "operation": "update",
+            "replacements": 2,
+            "created": false,
+            "overwritten": true,
+            "deleted": false
+          }
+        ],
+        "diff": "--- src/lib.py\n+++ src/lib.py\n@@\n-old\n+new\n"
+      }
+    }
+  },
+  "turn_completed": {
+    "type": "turn_completed"
+  },
+  "error": {
+    "type": "error",
+    "data": "model error"
+  }
+}

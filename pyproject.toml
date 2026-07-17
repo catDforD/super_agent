@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "morrow-py"
+version = "0.1.0"
+description = "A local coding agent CLI and web dashboard implemented in native Python."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Gargantua" }]
+dependencies = [
+  "fastapi>=0.128,<1",
+  "httpx>=0.28,<1",
+  "mcp>=1.25,<2",
+  "pydantic>=2.11,<3",
+  "uvicorn[standard]>=0.40,<1",
+]
+
+[project.scripts]
+morrow = "morrow.cli:main"
+
+[dependency-groups]
+dev = [
+  "mypy>=1.19,<2",
+  "pytest>=9,<10",
+  "pytest-cov>=7,<8",
+  "ruff>=0.14,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/morrow"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/web",
+  "/README.md",
+  "/ARCHITECTURE.md",
+  "/AGENTS.md",
+  "/LICENSE",
+  "/morrow.example.toml",
+  "/uv.lock",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["morrow"]
+mypy_path = "src"
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["mcp.*"]
+ignore_missing_imports = true

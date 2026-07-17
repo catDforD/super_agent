@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --frozen --dev
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run mypy src
+      - run: uv run pytest
+      - run: uv build
+      - name: Smoke-test wheel
+        run: |
+          uv tool install --force dist/*.whl
+          morrow --help
+
+  platform-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.11"
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: macos-latest
+            python: "3.11"
+          - os: windows-latest
+            python: "3.11"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - run: uv sync --frozen --dev
+      - run: uv run pytest
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm --dir web install --frozen-lockfile
+      - run: pnpm --dir web typecheck
+      - run: pnpm --dir web build
+      - run: git diff --exit-code -- src/morrow/server/assets

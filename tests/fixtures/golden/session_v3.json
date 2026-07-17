@@ -1,0 +1,54 @@
+{
+  "schema_version": 3,
+  "session": {
+    "active_thread": {
+      "messages": [
+        {
+          "role": "system",
+          "content": "Session summary:\nKnown facts"
+        },
+        {
+          "role": "user",
+          "content": "Continue"
+        }
+      ]
+    },
+    "turns": [
+      {
+        "turn": {
+          "status": "completed",
+          "user_message": {
+            "role": "user",
+            "content": "Hello"
+          },
+          "assistant_message": {
+            "role": "assistant",
+            "content": "Hi"
+          },
+          "steps": [
+            {
+              "kind": "model_call",
+              "status": "completed",
+              "error": null
+            }
+          ],
+          "error": null
+        },
+        "messages": [
+          {
+            "role": "user",
+            "content": "Hello"
+          },
+          {
+            "role": "assistant",
+            "content": "Hi"
+          }
+        ]
+      }
+    ],
+    "context": {
+      "summary": "Known facts",
+      "summarized_turns": 1
+    }
+  }
+}

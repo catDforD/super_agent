@@ -1,0 +1,39 @@
+[model]
+base_url = "https://api.openai.com/v1"
+model = "gpt-4.1"
+api_key_env = "OPENAI_API_KEY"
+timeout_secs = 120
+context_window_tokens = 128000
+reserved_output_tokens = 8192
+
+[agent]
+system_prompt = "You are a helpful assistant."
+
+[context]
+auto_compact = true
+auto_compact_threshold = 0.835
+retain_recent_turns = 6
+summary_target_tokens = 12000
+compact_max_retries = 2
+
+[permissions]
+mode = "read_only"
+shell = "deny"
+
+# [mcp_servers.filesystem]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+# env = {}
+# cwd = "."
+# enabled = true
+# startup_timeout_sec = 10
+# tool_timeout_sec = 60
+
+# [mcp_servers.remote]
+# url = "https://example.com/mcp"
+# http_headers = { "X-Client" = "morrow" }
+# env_http_headers = { "X-Api-Key" = "REMOTE_MCP_API_KEY" }
+# bearer_token_env_var = "REMOTE_MCP_TOKEN"
+# enabled = true
+# startup_timeout_sec = 10
+# tool_timeout_sec = 60
