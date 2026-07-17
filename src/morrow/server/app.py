@@ -14,7 +14,12 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from morrow import __version__
-from morrow.config import ContextConfig, McpServerConfig, ModelContextLimits
+from morrow.config import (
+    ContextConfig,
+    McpServerConfig,
+    ModelContextLimits,
+    PlcSubagentConfig,
+)
 from morrow.core import CancellationToken, Model
 from morrow.protocol import (
     ApprovalDecision,
@@ -51,6 +56,7 @@ class ServerOptions:
     config_path: Path
     permissions: PermissionProfile
     mcp_servers: list[McpServerConfig]
+    plc_subagents: PlcSubagentConfig = field(default_factory=PlcSubagentConfig)
     default_session_name: str = "default"
 
 
@@ -402,6 +408,7 @@ async def _run_turn_task(
                 workspace_root=state.options.workspace_root,
                 permissions=state.options.permissions,
                 mcp_servers=state.options.mcp_servers,
+                plc_subagents=state.options.plc_subagents,
                 mcp_cache=state.mcp_cache,
                 session_name=session_name,
                 turn_index=turn_index,

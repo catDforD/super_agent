@@ -11,9 +11,10 @@ import math
 import os
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -31,6 +32,7 @@ DEFAULT_SUMMARY_TARGET_TOKENS = 12_000
 DEFAULT_COMPACT_MAX_RETRIES = 2
 DEFAULT_MCP_STARTUP_TIMEOUT_SECS = 10
 DEFAULT_MCP_TOOL_TIMEOUT_SECS = 60
+DEFAULT_PLC_SUBAGENT_TIMEOUT_SECS = 600
 
 
 class ConfigError(Exception):
@@ -133,6 +135,17 @@ class UnsupportedMcpField(ConfigError):
         super().__init__(f"unsupported MCP config value: [mcp_servers.{server}].{field}")
 
 
+class MissingPlcSubagentBaseUrl(ConfigError):
+    def __init__(self) -> None:
+        super().__init__("missing required config value: [plc_subagents].base_url when enabled")
+
+
+class InvalidPlcSubagentBaseUrl(ConfigError):
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+        super().__init__(f"invalid config value: [plc_subagents].base_url {detail}")
+
+
 @dataclass(slots=True)
 class ModelContextLimits:
     context_window_tokens: int
@@ -211,6 +224,20 @@ class McpServerConfig:
         )
 
 
+@dataclass(slots=True, repr=False)
+class PlcSubagentConfig:
+    enabled: bool = False
+    base_url: str | None = None
+    timeout_secs: int = DEFAULT_PLC_SUBAGENT_TIMEOUT_SECS
+
+    def __repr__(self) -> str:
+        configured_url = "<configured>" if self.base_url is not None else None
+        return (
+            f"PlcSubagentConfig(enabled={self.enabled!r}, base_url={configured_url!r}, "
+            f"timeout_secs={self.timeout_secs!r})"
+        )
+
+
 @dataclass(slots=True)
 class AppConfig:
     model: ModelConfig
@@ -218,6 +245,7 @@ class AppConfig:
     context: ContextConfig
     permissions: PermissionProfile
     mcp_servers: list[McpServerConfig]
+    plc_subagents: PlcSubagentConfig = field(default_factory=PlcSubagentConfig)
 
 
 @dataclass(slots=True, repr=False)
@@ -277,12 +305,19 @@ class _RawMcpServerConfig(_RawModel):
     oauth_resource: str | None = None
 
 
+class _RawPlcSubagentConfig(_RawModel):
+    enabled: bool | None = None
+    base_url: str | None = None
+    timeout_secs: int | None = Field(default=None, ge=0)
+
+
 class _RawAppConfig(_RawModel):
     model: _RawModelConfig | None = None
     agent: _RawAgentConfig | None = None
     context: _RawContextConfig | None = None
     permissions: _RawPermissionsConfig | None = None
     mcp_servers: dict[str, _RawMcpServerConfig] = Field(default_factory=dict)
+    plc_subagents: _RawPlcSubagentConfig | None = None
 
 
 class _InvalidRawValue(Exception):
@@ -423,6 +458,7 @@ def _build_config(raw: _RawAppConfig, environ: Mapping[str, str]) -> AppConfig:
         context=context,
         permissions=permissions,
         mcp_servers=_parse_mcp_servers(raw.mcp_servers, environ),
+        plc_subagents=_build_plc_subagents(raw.plc_subagents or _RawPlcSubagentConfig()),
     )
 
 
@@ -477,6 +513,44 @@ def _positive(field: str, value: int) -> int:
     if value == 0:
         raise InvalidPositiveValue(field)
     return value
+
+
+def _build_plc_subagents(raw: _RawPlcSubagentConfig) -> PlcSubagentConfig:
+    enabled = raw.enabled if raw.enabled is not None else False
+    timeout_secs = _positive(
+        "[plc_subagents].timeout_secs",
+        raw.timeout_secs if raw.timeout_secs is not None else DEFAULT_PLC_SUBAGENT_TIMEOUT_SECS,
+    )
+    candidate = raw.base_url.strip() if raw.base_url is not None else ""
+    if not candidate:
+        if enabled:
+            raise MissingPlcSubagentBaseUrl
+        return PlcSubagentConfig(enabled=False, timeout_secs=timeout_secs)
+    return PlcSubagentConfig(
+        enabled=enabled,
+        base_url=_normalize_plc_subagent_base_url(candidate),
+        timeout_secs=timeout_secs,
+    )
+
+
+def _normalize_plc_subagent_base_url(value: str) -> str:
+    if any(character.isspace() for character in value):
+        raise InvalidPlcSubagentBaseUrl("must not contain whitespace")
+    if "?" in value or "#" in value:
+        raise InvalidPlcSubagentBaseUrl("must not contain a query or fragment")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise InvalidPlcSubagentBaseUrl("must be a valid URL") from exc
+    del port
+    if parsed.scheme not in {"http", "https"}:
+        raise InvalidPlcSubagentBaseUrl("must use http or https")
+    if parsed.hostname is None:
+        raise InvalidPlcSubagentBaseUrl("must include a host")
+    if parsed.username is not None or parsed.password is not None:
+        raise InvalidPlcSubagentBaseUrl("must not contain authentication information")
+    return value.rstrip("/")
 
 
 def _parse_mcp_servers(
@@ -576,9 +650,11 @@ __all__ = [
     "ConfigParseError",
     "ConfigReadError",
     "ContextConfig",
+    "DEFAULT_PLC_SUBAGENT_TIMEOUT_SECS",
     "ExplicitConfigNotFound",
     "InvalidAutoCompactThreshold",
     "InvalidMcpPositiveValue",
+    "InvalidPlcSubagentBaseUrl",
     "InvalidPositiveValue",
     "LoadedConfig",
     "McpServerConfig",
@@ -589,9 +665,11 @@ __all__ = [
     "MissingMcpEnvVar",
     "MissingMcpUrl",
     "MissingModel",
+    "MissingPlcSubagentBaseUrl",
     "ModelConfig",
     "ModelContextLimits",
     "NoConfigFile",
+    "PlcSubagentConfig",
     "UnsupportedMcpField",
     "load_config",
     "load_config_from_locations",

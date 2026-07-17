@@ -231,6 +231,7 @@ async def _run(args: CliArgs) -> None:
                     config_path=loaded.path,
                     permissions=permissions,
                     mcp_servers=loaded.config.mcp_servers,
+                    plc_subagents=loaded.config.plc_subagents,
                     default_session_name=session_name,
                 )
             )
@@ -414,6 +415,7 @@ async def _run_agent_turn(
                 workspace_root=workspace_root,
                 permissions=permissions,
                 mcp_servers=loaded.config.mcp_servers,
+                plc_subagents=loaded.config.plc_subagents,
                 mcp_cache=mcp_cache,
                 session_name=session_name,
                 turn_index=len(session.turns),

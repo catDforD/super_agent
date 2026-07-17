@@ -20,6 +20,13 @@ compact_max_retries = 2
 mode = "read_only"
 shell = "deny"
 
+# Enabling these tools sends PLC requirements, source code, properties, and test inputs to the
+# configured remote service. The tools do not write returned code or artifacts to the workspace.
+# [plc_subagents]
+# enabled = true
+# base_url = "http://60.188.37.6:28080"
+# timeout_secs = 600
+
 # [mcp_servers.filesystem]
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "."]

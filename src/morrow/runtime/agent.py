@@ -10,7 +10,12 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
-from morrow.config import ContextConfig, McpServerConfig, ModelContextLimits
+from morrow.config import (
+    ContextConfig,
+    McpServerConfig,
+    ModelContextLimits,
+    PlcSubagentConfig,
+)
 from morrow.core import (
     Agent,
     CancellationToken,
@@ -30,6 +35,7 @@ from morrow.protocol import (
 from morrow.runtime.compaction import maybe_auto_compact_with_tools
 from morrow.runtime.events import AgentEventEnvelope, make_event_envelope
 from morrow.tools.mcp import McpToolCache
+from morrow.tools.plc_subagents import PLC_SUBAGENT_GUIDANCE, PlcSubagentTools
 from morrow.tools.registry import ToolRegistry
 
 _Value = TypeVar("_Value")
@@ -62,6 +68,7 @@ class RunAgentTurnContext:
     workspace_root: Path
     permissions: PermissionProfile
     mcp_servers: Sequence[McpServerConfig] = field(default_factory=tuple)
+    plc_subagents: PlcSubagentConfig = field(default_factory=PlcSubagentConfig)
     mcp_cache: McpToolCache | None = None
     session_name: str = "default"
     turn_index: int = 0
@@ -162,11 +169,12 @@ async def _run_agent_turn_inner(
 
     tools = build.registry
     definitions = tools.definitions()
+    effective_system_prompt = _effective_system_prompt(context.system_prompt, context.plc_subagents)
     try:
         compaction = _await_with_cancellation(
             maybe_auto_compact_with_tools(
                 context.client,
-                context.system_prompt,
+                effective_system_prompt,
                 session,
                 context.context_config,
                 context.model_limits,
@@ -183,7 +191,7 @@ async def _run_agent_turn_inner(
         session.apply_turn(TurnRecord.failed_user_prompt(prompt, message))
         return RunAgentTurnOutcome(session_changed=True, error=message)
 
-    agent = Agent.with_tools(context.client, context.system_prompt, tools)
+    agent = Agent.with_tools(context.client, effective_system_prompt, tools)
     event_index = 0
     for diagnostic in build.diagnostics:
         envelope = make_event_envelope(
@@ -288,7 +296,16 @@ async def _build_tools(
         cache,
     )
     result = await _await_with_cancellation(build, cancellation)
+    if context.plc_subagents.enabled:
+        result.registry.register(PlcSubagentTools(context.plc_subagents))
     return _ToolBuild(registry=result.registry, diagnostics=result.diagnostics)
+
+
+def _effective_system_prompt(system_prompt: str, plc_subagents: PlcSubagentConfig) -> str:
+    if not plc_subagents.enabled or PLC_SUBAGENT_GUIDANCE in system_prompt:
+        return system_prompt
+    separator = "\n\n" if system_prompt else ""
+    return f"{system_prompt}{separator}{PLC_SUBAGENT_GUIDANCE}"
 
 
 async def _await_with_cancellation(

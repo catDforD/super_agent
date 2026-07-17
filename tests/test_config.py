@@ -9,14 +9,18 @@ from morrow.config import (
     DEFAULT_BASE_URL,
     DEFAULT_MCP_STARTUP_TIMEOUT_SECS,
     DEFAULT_MCP_TOOL_TIMEOUT_SECS,
+    DEFAULT_PLC_SUBAGENT_TIMEOUT_SECS,
     ConfigParseError,
     InvalidAutoCompactThreshold,
     InvalidMcpPositiveValue,
+    InvalidPlcSubagentBaseUrl,
+    InvalidPositiveValue,
     McpTransport,
     MissingApiKey,
     MissingContextWindowTokens,
     MissingMcpEnvVar,
     MissingModel,
+    MissingPlcSubagentBaseUrl,
     UnsupportedMcpField,
     load_config_from_locations,
 )
@@ -78,6 +82,9 @@ shell = "deny"
     assert loaded.config.context.auto_compact_threshold == DEFAULT_AUTO_COMPACT_THRESHOLD
     assert loaded.config.permissions.mode is PermissionMode.WORKSPACE_WRITE
     assert loaded.config.permissions.shell is ShellPolicy.DENY
+    assert loaded.config.plc_subagents.enabled is False
+    assert loaded.config.plc_subagents.base_url is None
+    assert loaded.config.plc_subagents.timeout_secs == DEFAULT_PLC_SUBAGENT_TIMEOUT_SECS
 
 
 def test_missing_required_model_values_and_api_key(tmp_path: Path) -> None:
@@ -232,4 +239,90 @@ tool_timeout_sec = 0
         encoding="utf-8",
     )
     with pytest.raises(MissingMcpEnvVar):
+        load_config_from_locations(config, tmp_path, None, environ={})
+
+
+def test_plc_subagents_enablement_normalization_and_safe_repr(tmp_path: Path) -> None:
+    config = tmp_path / "morrow.toml"
+    config.write_text(
+        """
+[model]
+model = "x"
+OPENAI_API_KEY = "secret"
+context_window_tokens = 65536
+
+[plc_subagents]
+enabled = true
+base_url = " http://60.188.37.6:28080/ "
+timeout_secs = 45
+""",
+        encoding="utf-8",
+    )
+
+    loaded = load_config_from_locations(config, tmp_path, None, environ={})
+
+    assert loaded.config.plc_subagents.enabled is True
+    assert loaded.config.plc_subagents.base_url == "http://60.188.37.6:28080"
+    assert loaded.config.plc_subagents.timeout_secs == 45
+    debug = repr(loaded)
+    assert "60.188.37.6" not in debug
+    assert "<configured>" in debug
+
+
+def test_plc_subagents_require_url_and_positive_timeout_when_enabled(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "morrow.toml"
+    config.write_text(
+        """
+[model]
+model = "x"
+OPENAI_API_KEY = "secret"
+context_window_tokens = 65536
+
+[plc_subagents]
+enabled = true
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(MissingPlcSubagentBaseUrl):
+        load_config_from_locations(config, tmp_path, None, environ={})
+
+    config.write_text(
+        config.read_text(encoding="utf-8") + 'base_url = "https://example.com"\ntimeout_secs = 0\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(InvalidPositiveValue):
+        load_config_from_locations(config, tmp_path, None, environ={})
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "ftp://example.com",
+        "http:///missing-host",
+        "http://user:password@example.com",
+        "https://example.com/path?token=secret",
+        "https://example.com/path#fragment",
+        "https://example.com/white space",
+        "https://example.com:invalid",
+    ],
+)
+def test_plc_subagents_reject_unsafe_or_invalid_urls(tmp_path: Path, base_url: str) -> None:
+    config = tmp_path / "morrow.toml"
+    config.write_text(
+        f"""
+[model]
+model = "x"
+OPENAI_API_KEY = "secret"
+context_window_tokens = 65536
+
+[plc_subagents]
+enabled = false
+base_url = "{base_url}"
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(InvalidPlcSubagentBaseUrl):
         load_config_from_locations(config, tmp_path, None, environ={})

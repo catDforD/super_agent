@@ -18,6 +18,13 @@ from .patching import (
     plan_patch_changes,
     render_file_diff,
 )
+from .plc_subagents import (
+    PLC_SUBAGENT_GUIDANCE,
+    PlcSubagentError,
+    PlcSubagentProtocolError,
+    PlcSubagentTools,
+    plc_subagent_definitions,
+)
 from .registry import (
     DuplicateToolError,
     Tool,
@@ -36,6 +43,10 @@ __all__ = [
     "PatchHunk",
     "PatchOperationKind",
     "StagedPatchChange",
+    "PLC_SUBAGENT_GUIDANCE",
+    "PlcSubagentError",
+    "PlcSubagentProtocolError",
+    "PlcSubagentTools",
     "TOOL_CANCELLED_ERROR",
     "Tool",
     "ToolRegistry",
@@ -47,5 +58,6 @@ __all__ = [
     "discover_tools",
     "parse_patch",
     "plan_patch_changes",
+    "plc_subagent_definitions",
     "render_file_diff",
 ]
