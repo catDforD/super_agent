@@ -61,6 +61,7 @@ async def test_status_and_session_crud_use_frontend_contract(tmp_path: Path, mon
         status = await client.get("/api/status")
         assert status.status_code == 200
         assert status.json()["workspace_root"] == str(workspace)
+        assert status.json()["workspace_selection_enabled"] is True
         assert "api_key" not in status.text
 
         created = await client.post("/api/sessions/work")
@@ -116,4 +117,98 @@ async def test_websocket_runs_and_saves_turn(tmp_path: Path, monkeypatch) -> Non
     assert document["session"]["turns"][0]["turn"]["status"] == "completed"
     assert document["session"]["turns"][0]["turn"]["assistant_message"]["content"] == "hello"
     runtime.unsubscribe(queue)
+    await state.close()
+
+
+@pytest.mark.anyio
+async def test_directory_browser_filters_hidden_entries_and_sorts_directories_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    home.mkdir()
+    workspace.mkdir()
+    (home / "z-folder").mkdir()
+    (home / "a-folder").mkdir()
+    (home / ".hidden-folder").mkdir()
+    (home / "file.txt").write_text("file", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+
+    app = create_app(options(workspace))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        listing = await client.get("/api/workspaces/directory")
+        hidden = await client.get(
+            "/api/workspaces/directory",
+            params={"path": str(home), "show_hidden": "true"},
+        )
+
+    assert listing.status_code == 200
+    assert listing.json()["path"] == str(home)
+    assert listing.json()["parent"] == str(tmp_path)
+    assert [entry["name"] for entry in listing.json()["entries"]] == [
+        "a-folder",
+        "z-folder",
+        "file.txt",
+    ]
+    assert [entry["name"] for entry in hidden.json()["entries"]] == [
+        ".hidden-folder",
+        "a-folder",
+        "z-folder",
+        "file.txt",
+    ]
+
+
+@pytest.mark.anyio
+async def test_workspace_switch_isolates_sessions_and_updates_turn_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    home.mkdir()
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    app = create_app(options(first))
+    state = app.state.morrow
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        assert (await client.post("/api/sessions/work")).status_code == 200
+        switched = await client.post("/api/workspaces/open", json={"path": str(second)})
+        assert switched.status_code == 200
+        assert switched.json()["workspace_root"] == str(second)
+        assert (await client.get("/api/sessions")).json() == []
+
+        runtime = await state.runtime_for("default")
+        queue = runtime.subscribe()
+        await _handle_client_message(
+            state,
+            runtime,
+            "default",
+            {
+                "type": "start_turn",
+                "data": {"request_id": "request-second", "prompt": "hi"},
+            },
+        )
+        event_workspace = None
+        while True:
+            message = await asyncio.wait_for(queue.get(), timeout=2)
+            if message["type"] == "agent_event":
+                event_workspace = message["data"]["workspace_root"]
+            if message["type"] == "turn_saved":
+                break
+        runtime.unsubscribe(queue)
+        assert event_workspace == str(second)
+
+        switched_back = await client.post("/api/workspaces/open", json={"path": str(first)})
+        assert switched_back.status_code == 200
+        listing = await client.get("/api/sessions")
+        assert [entry["name"] for entry in listing.json()] == ["work"]
+
     await state.close()

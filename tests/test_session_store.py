@@ -49,6 +49,27 @@ def test_scope_is_canonical_cwd_hex_and_missing_load_is_empty(tmp_path: Path) ->
         store.load_existing()
 
 
+def test_for_workspace_isolates_identical_names_and_canonicalizes(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    first_workspace = tmp_path / "first"
+    second_workspace = tmp_path / "second"
+    home.mkdir()
+    first_workspace.mkdir()
+    second_workspace.mkdir()
+
+    first = SessionStore.for_workspace(first_workspace, "work", home=home)
+    canonical = SessionStore.for_workspace(first_workspace / ".", "work", home=home)
+    second = SessionStore.for_workspace(second_workspace, "work", home=home)
+    first.save(_sample_session())
+
+    assert canonical.path == first.path
+    assert canonical.load() == _sample_session()
+    assert second.path != first.path
+    assert second.load() == Session.new()
+
+
 def test_rejects_invalid_session_names(tmp_path: Path) -> None:
     cwd = tmp_path / "cwd"
     cwd.mkdir()

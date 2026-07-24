@@ -206,11 +206,28 @@ class SessionStore:
             cwd = Path.cwd()
         except OSError as exc:
             raise CurrentDirError(exc) from exc
-        morrow_home = home / ".morrow"
+        return cls.for_workspace(cwd, session_name, home=home)
+
+    @classmethod
+    def for_workspace(
+        cls,
+        workspace: str | Path,
+        session_name: str,
+        *,
+        home: str | Path | None = None,
+    ) -> SessionStore:
+        if home is None:
+            try:
+                resolved_home = Path.home()
+            except RuntimeError as exc:
+                raise HomeDirNotFound from exc
+        else:
+            resolved_home = Path(home)
+        morrow_home = resolved_home / ".morrow"
         return cls(
             morrow_home / "sessions",
             morrow_home / "threads",
-            cwd,
+            workspace,
             session_name,
         )
 

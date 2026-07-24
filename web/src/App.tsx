@@ -2,6 +2,7 @@ import type { FormEvent, KeyboardEvent, ReactNode } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
+  ArrowUp,
   Bot,
   CalendarClock,
   Check,
@@ -12,6 +13,7 @@ import {
   Clock3,
   FileText,
   Folder,
+  FolderOpen,
   ListTree,
   Moon,
   PanelLeft,
@@ -50,12 +52,14 @@ import type {
   RunTrace,
   ToolExecutionSummary,
   ToolRun,
+  WorkspaceDirectoryListing,
 } from './types'
 
 type InspectorPanel = 'run' | 'tools' | 'recent'
 type ConnectionStatus = 'connecting' | 'connected' | 'disconnected'
 
 const markdownPlugins = [remarkGfm]
+const recentWorkspacesKey = 'morrow-recent-workspaces'
 
 const emptySessionEntry = (name: string): SessionEntryResponse => ({
   name,
@@ -82,6 +86,10 @@ export default function App() {
   const [inspectorPanel, setInspectorPanel] = useState<InspectorPanel>('run')
   const [isInspectorOpen, setIsInspectorOpen] = useState(false)
   const [isCreatingSession, setIsCreatingSession] = useState(false)
+  const [isWorkspaceDialogOpen, setIsWorkspaceDialogOpen] = useState(false)
+  const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>(() =>
+    loadRecentWorkspaces(),
+  )
   const [newSessionName, setNewSessionName] = useState('')
   const [createSessionError, setCreateSessionError] = useState<string | null>(
     null,
@@ -110,6 +118,25 @@ export default function App() {
   const nextId = useCallback((prefix: string) => {
     idRef.current += 1
     return `${prefix}-${Date.now()}-${idRef.current}`
+  }, [])
+
+  const rememberWorkspace = useCallback((path: string) => {
+    setRecentWorkspaces((current) => {
+      const next = [path, ...current.filter((entry) => entry !== path)].slice(
+        0,
+        10,
+      )
+      localStorage.setItem(recentWorkspacesKey, JSON.stringify(next))
+      return next
+    })
+  }, [])
+
+  const removeRecentWorkspace = useCallback((path: string) => {
+    setRecentWorkspaces((current) => {
+      const next = current.filter((entry) => entry !== path)
+      localStorage.setItem(recentWorkspacesKey, JSON.stringify(next))
+      return next
+    })
   }, [])
 
   const recordActivity = useCallback(
@@ -544,6 +571,10 @@ export default function App() {
           setRunningTurn(null)
           showError(message.data.reason)
           break
+        case 'workspace_changed':
+          socketRef.current?.close()
+          window.location.assign('/?session=default')
+          break
         case 'error':
           setRunningTurn(null)
           showError(message.data.message)
@@ -684,6 +715,7 @@ export default function App() {
         const loadedStatus = await fetchJson<StatusResponse>('/api/status')
         if (!mounted) return
         setStatus(loadedStatus)
+        rememberWorkspace(loadedStatus.workspace_root)
         const name = new URLSearchParams(location.search).get('session') || 'default'
         selectedRef.current = name
         await loadSessions()
@@ -698,7 +730,7 @@ export default function App() {
       mounted = false
       closeSocket()
     }
-  }, [closeSocket, loadSessions, selectSession, showError])
+  }, [closeSocket, loadSessions, rememberWorkspace, selectSession, showError])
 
   const selectedEntry = useMemo(
     () => sessions.find((session) => session.name === selected),
@@ -830,6 +862,17 @@ export default function App() {
     }
   }
 
+  const switchWorkspace = async (path: string) => {
+    const nextStatus = await fetchJson<StatusResponse>('/api/workspaces/open', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    })
+    rememberWorkspace(nextStatus.workspace_root)
+    setStatus(nextStatus)
+    window.location.assign('/?session=default')
+  }
+
   return (
     <>
       <div className={`app-frame${isSidebarOpen ? ' sidebar-open' : ''}`}>
@@ -864,6 +907,7 @@ export default function App() {
           onToggleSearch={toggleSearch}
           onSessionFilterChange={setSessionFilter}
           onRefresh={() => void refresh()}
+          onOpenProjects={() => setIsWorkspaceDialogOpen(true)}
           onClose={() => setIsSidebarOpen(false)}
           onThemeToggle={() =>
             setTheme((current) => (current === 'dark' ? 'light' : 'dark'))
@@ -923,6 +967,15 @@ export default function App() {
         onApprove={() => sendApproval(true)}
         onDeny={() => sendApproval(false)}
       />
+      <WorkspaceDialog
+        open={isWorkspaceDialogOpen}
+        status={status}
+        recentWorkspaces={recentWorkspaces}
+        running={isRunning}
+        onClose={() => setIsWorkspaceDialogOpen(false)}
+        onOpenWorkspace={switchWorkspace}
+        onRemoveRecent={removeRecentWorkspace}
+      />
     </>
   )
 }
@@ -950,6 +1003,7 @@ function AppSidebar({
   onToggleSearch,
   onSessionFilterChange,
   onRefresh,
+  onOpenProjects,
   onClose,
   onThemeToggle,
 }: {
@@ -975,6 +1029,7 @@ function AppSidebar({
   onToggleSearch: () => void
   onSessionFilterChange: (value: string) => void
   onRefresh: () => void
+  onOpenProjects: () => void
   onClose: () => void
   onThemeToggle: () => void
 }) {
@@ -1022,8 +1077,10 @@ function AppSidebar({
         <SidebarAction
           icon={<Folder size={18} />}
           label="Projects"
-          badge="Soon"
-          disabled
+          badge={status?.workspace_selection_enabled === false ? 'Local only' : undefined}
+          disabled={!status?.workspace_selection_enabled}
+          disabledTitle="Workspace selection is available only on loopback hosts"
+          onClick={onOpenProjects}
         />
         <SidebarAction
           icon={<CalendarClock size={18} />}
@@ -1097,9 +1154,19 @@ function AppSidebar({
       </section>
 
       <div className="sidebar-footer">
-        <div className="workspace-summary">
+        <button
+          className="workspace-summary"
+          type="button"
+          title={
+            status?.workspace_selection_enabled
+              ? status.workspace_root
+              : 'Workspace selection is available only on loopback hosts'
+          }
+          disabled={!status?.workspace_selection_enabled}
+          onClick={onOpenProjects}
+        >
           <Folder size={17} />
-          <div title={status?.workspace_root || ''}>
+          <div>
             <strong>{workspace}</strong>
             <span>{permission}</span>
           </div>
@@ -1107,7 +1174,7 @@ function AppSidebar({
             className={`workspace-connection ${connectionState}`}
             title={connectionState}
           />
-        </div>
+        </button>
         <div className="sidebar-footer-row">
           <button
             className="sidebar-settings"
@@ -1138,19 +1205,21 @@ function SidebarAction({
   label,
   badge,
   disabled = false,
+  disabledTitle,
   onClick,
 }: {
   icon: ReactNode
   label: string
   badge?: string
   disabled?: boolean
+  disabledTitle?: string
   onClick?: () => void
 }) {
   return (
     <button
       className="sidebar-action"
       type="button"
-      title={disabled ? `${label} coming soon` : label}
+      title={disabled ? disabledTitle ?? `${label} coming soon` : label}
       disabled={disabled}
       onClick={onClick}
     >
@@ -1893,6 +1962,228 @@ function CreateSessionRow({
   )
 }
 
+function WorkspaceDialog({
+  open,
+  status,
+  recentWorkspaces,
+  running,
+  onClose,
+  onOpenWorkspace,
+  onRemoveRecent,
+}: {
+  open: boolean
+  status: StatusResponse | null
+  recentWorkspaces: string[]
+  running: boolean
+  onClose: () => void
+  onOpenWorkspace: (path: string) => Promise<void>
+  onRemoveRecent: (path: string) => void
+}) {
+  const [listing, setListing] = useState<WorkspaceDirectoryListing | null>(null)
+  const [pathInput, setPathInput] = useState('')
+  const [showHidden, setShowHidden] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const browse = async (path: string, hidden = showHidden) => {
+    setBusy(true)
+    setError(null)
+    try {
+      const query = new URLSearchParams({
+        path,
+        show_hidden: String(hidden),
+      })
+      const directory = await fetchJson<WorkspaceDirectoryListing>(
+        `/api/workspaces/directory?${query.toString()}`,
+      )
+      setListing(directory)
+      setPathInput(directory.path)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!open || !status) return
+    setListing(null)
+    setPathInput(status.workspace_root)
+    setShowHidden(false)
+    setError(null)
+    void browse(status.workspace_root, false)
+  }, [open, status?.workspace_root])
+
+  if (!open || !status) return null
+
+  const openWorkspace = async (path: string) => {
+    setBusy(true)
+    setError(null)
+    try {
+      await onOpenWorkspace(path)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+      setBusy(false)
+    }
+  }
+
+  const submitPath = (event: FormEvent) => {
+    event.preventDefault()
+    if (pathInput.trim()) void browse(pathInput.trim())
+  }
+
+  const recent = recentWorkspaces.filter(
+    (path) => path !== status.workspace_root,
+  )
+
+  return (
+    <div className="workspace-overlay" role="dialog" aria-modal="true">
+      <section className="workspace-panel">
+        <header>
+          <div>
+            <p className="eyebrow">Projects</p>
+            <h2>Choose a workspace</h2>
+          </div>
+          <IconButton title="Close workspace picker" onClick={onClose}>
+            <X size={20} />
+          </IconButton>
+        </header>
+
+        <div className="workspace-current">
+          <Folder size={18} />
+          <div>
+            <span>Current workspace</span>
+            <strong title={status.workspace_root}>{status.workspace_root}</strong>
+          </div>
+        </div>
+
+        {recent.length > 0 ? (
+          <section className="workspace-recent">
+            <h3>Recent</h3>
+            <div>
+              {recent.map((path) => (
+                <div className="workspace-recent-row" key={path}>
+                  <button
+                    type="button"
+                    disabled={busy || running}
+                    onClick={() => void openWorkspace(path)}
+                  >
+                    <FolderOpen size={16} />
+                    <span>
+                      <strong>{workspaceName(path)}</strong>
+                      <small title={path}>{path}</small>
+                    </span>
+                  </button>
+                  <MiniIconButton
+                    title={`Remove ${path} from recent workspaces`}
+                    disabled={busy}
+                    onClick={() => onRemoveRecent(path)}
+                  >
+                    <X size={15} />
+                  </MiniIconButton>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        <section className="workspace-browser">
+          <div className="workspace-browser-heading">
+            <h3>Browse folders</h3>
+            <label>
+              <input
+                type="checkbox"
+                checked={showHidden}
+                disabled={busy}
+                onChange={(event) => {
+                  const hidden = event.target.checked
+                  setShowHidden(hidden)
+                  if (listing) void browse(listing.path, hidden)
+                }}
+              />
+              Show hidden
+            </label>
+          </div>
+          <form className="workspace-path-row" onSubmit={submitPath}>
+            <MiniIconButton
+              title="Open parent folder"
+              disabled={busy || !listing?.parent}
+              onClick={() => listing?.parent && void browse(listing.parent)}
+            >
+              <ArrowUp size={16} />
+            </MiniIconButton>
+            <input
+              aria-label="Workspace directory path"
+              value={pathInput}
+              disabled={busy}
+              onChange={(event) => setPathInput(event.target.value)}
+            />
+            <button type="submit" disabled={busy || !pathInput.trim()}>
+              Go
+            </button>
+            <MiniIconButton
+              title="Refresh folder"
+              disabled={busy || !listing}
+              onClick={() => listing && void browse(listing.path)}
+            >
+              <RefreshCw className={busy ? 'spin' : ''} size={16} />
+            </MiniIconButton>
+          </form>
+          <div className="workspace-directory-list main-scroll">
+            {listing?.entries.length ? (
+              listing.entries.map((entry) =>
+                entry.directory ? (
+                  <button
+                    type="button"
+                    key={entry.path}
+                    disabled={busy}
+                    onClick={() => void browse(entry.path)}
+                  >
+                    <Folder size={17} />
+                    <span>{entry.name}</span>
+                    {entry.hidden ? <small>hidden</small> : null}
+                  </button>
+                ) : (
+                  <div className="workspace-file-row" key={entry.path}>
+                    <FileText size={17} />
+                    <span>{entry.name}</span>
+                  </div>
+                ),
+              )
+            ) : (
+              <p className="muted-line">
+                {busy ? 'Loading folders…' : 'This directory is empty.'}
+              </p>
+            )}
+          </div>
+        </section>
+
+        {running ? (
+          <p className="workspace-warning">
+            Stop the running turn before switching workspaces.
+          </p>
+        ) : null}
+        {error ? <p className="workspace-error">{error}</p> : null}
+
+        <footer>
+          <button className="workspace-cancel" type="button" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            className="workspace-open"
+            type="button"
+            disabled={busy || running || !listing}
+            onClick={() => listing && void openWorkspace(listing.path)}
+          >
+            <FolderOpen size={17} />
+            Open this folder
+          </button>
+        </footer>
+      </section>
+    </div>
+  )
+}
+
 function ApprovalDialog({
   request,
   onApprove,
@@ -2284,6 +2575,19 @@ function compactText(text: string, length: number): string {
 function workspaceName(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean)
   return parts.at(-1) || path
+}
+
+function loadRecentWorkspaces(): string[] {
+  try {
+    const stored = JSON.parse(localStorage.getItem(recentWorkspacesKey) ?? '[]')
+    if (!Array.isArray(stored)) return []
+    return stored
+      .filter((path): path is string => typeof path === 'string' && Boolean(path))
+      .filter((path, index, entries) => entries.indexOf(path) === index)
+      .slice(0, 10)
+  } catch {
+    return []
+  }
 }
 
 function formatPermissionMode(mode: string): string {

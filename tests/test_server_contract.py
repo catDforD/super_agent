@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -318,3 +319,121 @@ async def test_wrong_approval_id_preserves_pending_request(
         with pytest.raises(asyncio.CancelledError):
             await worker
         await state.close()
+
+
+@pytest.mark.anyio
+async def test_workspace_endpoints_are_disabled_for_non_loopback_bindings(
+    isolated_workspace: tuple[Path, Path],
+) -> None:
+    _, workspace = isolated_workspace
+    options = _options(workspace)
+    options.host = "0.0.0.0"
+    app = server.create_app(options)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        status = await client.get("/api/status")
+        listing = await client.get("/api/workspaces/directory")
+        opened = await client.post("/api/workspaces/open", json={"path": str(workspace)})
+
+    assert status.json()["workspace_selection_enabled"] is False
+    assert listing.status_code == 403
+    assert opened.status_code == 403
+
+
+@pytest.mark.anyio
+async def test_workspace_switch_validates_target_and_is_idempotent(
+    isolated_workspace: tuple[Path, Path],
+) -> None:
+    _, workspace = isolated_workspace
+    target = workspace.parent / "target"
+    target.mkdir()
+    file_target = workspace / "file.txt"
+    file_target.write_text("file", encoding="utf-8")
+    app = server.create_app(_options(workspace))
+    state: server.ServerState = app.state.morrow
+    old_cache = state.mcp_cache
+    old_cache.aclose = AsyncMock()  # type: ignore[method-assign]
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        same = await client.post("/api/workspaces/open", json={"path": str(workspace / ".")})
+        assert state.mcp_cache is old_cache
+        empty = await client.post("/api/workspaces/open", json={"path": "   "})
+        missing = await client.post(
+            "/api/workspaces/open", json={"path": str(workspace / "missing")}
+        )
+        not_directory = await client.post("/api/workspaces/open", json={"path": str(file_target)})
+        switched = await client.post("/api/workspaces/open", json={"path": str(target)})
+
+    assert same.status_code == 200
+    assert state.mcp_cache is not old_cache
+    old_cache.aclose.assert_awaited_once()  # type: ignore[attr-defined]
+    assert empty.status_code == 400
+    assert missing.status_code == 400
+    assert not_directory.status_code == 400
+    assert switched.status_code == 200
+    assert state.workspace_root == target
+    await state.close()
+
+
+@pytest.mark.anyio
+async def test_workspace_switch_rejects_running_turn_and_preserves_workspace(
+    isolated_workspace: tuple[Path, Path],
+) -> None:
+    _, workspace = isolated_workspace
+    target = workspace.parent / "target"
+    target.mkdir()
+    app = server.create_app(_options(workspace))
+    state: server.ServerState = app.state.morrow
+    runtime = await state.runtime_for("work")
+    worker = asyncio.create_task(_wait_forever())
+    runtime.running = server.RunningTurn(
+        turn_id="turn-running",
+        cancellation=CancellationToken(),
+        task=worker,
+    )
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/api/workspaces/open", json={"path": str(target)})
+        assert response.status_code == 409
+        assert response.json() == {"error": "cannot switch workspace while a turn is running"}
+        assert state.workspace_root == workspace
+    finally:
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+        await state.close()
+
+
+@pytest.mark.anyio
+async def test_switch_notifies_and_rejects_stale_websocket_runtime(
+    isolated_workspace: tuple[Path, Path],
+) -> None:
+    _, workspace = isolated_workspace
+    target = workspace.parent / "target"
+    target.mkdir()
+    state = server.ServerState(_options(workspace))
+    runtime = await state.runtime_for("default")
+    queue = runtime.subscribe()
+
+    await state.switch_workspace(target)
+    changed = await asyncio.wait_for(queue.get(), timeout=1)
+    assert changed == {
+        "type": "workspace_changed",
+        "data": {"workspace_root": str(target)},
+    }
+
+    await server._handle_client_message(
+        state,
+        runtime,
+        "default",
+        {"type": "start_turn", "data": {"request_id": "stale", "prompt": "hello"}},
+    )
+    rejected = await asyncio.wait_for(queue.get(), timeout=1)
+    assert rejected == changed
+    assert runtime.running is None
+
+    runtime.unsubscribe(queue)
+    await state.close()

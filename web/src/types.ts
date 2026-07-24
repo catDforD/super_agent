@@ -14,9 +14,23 @@ export interface PermissionProfile {
 
 export interface StatusResponse {
   workspace_root: string
+  workspace_selection_enabled: boolean
   config_path: string
   permissions: PermissionProfile
   version: string
+}
+
+export interface WorkspaceDirectoryEntry {
+  name: string
+  path: string
+  directory: boolean
+  hidden: boolean
+}
+
+export interface WorkspaceDirectoryListing {
+  path: string
+  parent?: string | null
+  entries: WorkspaceDirectoryEntry[]
 }
 
 export interface SessionEntryResponse {
@@ -186,6 +200,7 @@ export type ServerMessage =
   | { type: 'agent_event'; data: AgentEventEnvelope }
   | { type: 'turn_saved'; data: { session: string; turn_index: number } }
   | { type: 'turn_rejected'; data: { request_id: string; reason: string } }
+  | { type: 'workspace_changed'; data: { workspace_root: string } }
   | { type: 'error'; data: { message: string } }
 
 export type ClientMessage =

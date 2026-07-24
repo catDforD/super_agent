@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import ipaddress
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,6 +13,7 @@ from urllib.parse import SplitResult, urlsplit
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, Response
+from pydantic import BaseModel, ConfigDict
 
 from morrow import __version__
 from morrow.config import (
@@ -83,6 +85,7 @@ class RunningTurn:
 
 @dataclass(slots=True)
 class SessionRuntime:
+    workspace_revision: int = 0
     subscribers: set[asyncio.Queue[dict[str, Any]]] = field(default_factory=set)
     running: RunningTurn | None = None
 
@@ -103,16 +106,42 @@ class SessionRuntime:
                 queue.put_nowait(message)
 
 
+class WorkspaceOpenRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+
+
 class ServerState:
     def __init__(self, options: ServerOptions) -> None:
         self.options = options
+        self.workspace_root = _resolve_directory(options.workspace_root)
+        self.workspace_revision = 0
+        self.workspace_selection_enabled = _host_is_loopback(options.host)
         self.sessions: dict[str, SessionRuntime] = {}
         self.lock = asyncio.Lock()
+        self.workspace_lock = asyncio.Lock()
         self.mcp_cache = McpToolCache()
 
     async def runtime_for(self, session_name: str) -> SessionRuntime:
         async with self.lock:
-            return self.sessions.setdefault(session_name, SessionRuntime())
+            return self.sessions.setdefault(
+                session_name,
+                SessionRuntime(workspace_revision=self.workspace_revision),
+            )
+
+    async def status_wire(self) -> dict[str, Any]:
+        async with self.lock:
+            return self._status_wire_unlocked()
+
+    def _status_wire_unlocked(self) -> dict[str, Any]:
+        return {
+            "workspace_root": str(self.workspace_root),
+            "workspace_selection_enabled": self.workspace_selection_enabled,
+            "config_path": str(self.options.config_path),
+            "permissions": self.options.permissions.to_wire(),
+            "version": __version__,
+        }
 
     async def running_snapshot(self, session_name: str) -> dict[str, Any] | None:
         async with self.lock:
@@ -127,17 +156,75 @@ class ServerState:
                 ),
             }
 
-    async def snapshot(self, session_name: str) -> dict[str, Any]:
-        store = _session_store(session_name)
-        session = store.load()
-        return {
-            "type": "snapshot",
-            "data": {
-                "session": session.to_wire(),
-                "running_turn": await self.running_snapshot(session_name),
-                "permissions": self.options.permissions.to_wire(),
-            },
-        }
+    async def snapshot(
+        self,
+        session_name: str,
+        runtime: SessionRuntime | None = None,
+    ) -> dict[str, Any]:
+        async with self.workspace_lock:
+            async with self.lock:
+                if runtime is not None and not self._runtime_is_current_unlocked(
+                    session_name, runtime
+                ):
+                    return _workspace_changed_message(self.workspace_root)
+                workspace_root = self.workspace_root
+                active_runtime = self.sessions.get(session_name)
+                running = active_runtime.running if active_runtime else None
+                running_wire = (
+                    {
+                        "turn_id": running.turn_id,
+                        "pending_approval": (
+                            running.pending_approval.request_id
+                            if running.pending_approval
+                            else None
+                        ),
+                    }
+                    if running is not None
+                    else None
+                )
+            store = _session_store(workspace_root, session_name)
+            session = await asyncio.to_thread(store.load)
+            return {
+                "type": "snapshot",
+                "data": {
+                    "session": session.to_wire(),
+                    "running_turn": running_wire,
+                    "permissions": self.options.permissions.to_wire(),
+                },
+            }
+
+    def _runtime_is_current_unlocked(
+        self,
+        session_name: str,
+        runtime: SessionRuntime,
+    ) -> bool:
+        return (
+            runtime.workspace_revision == self.workspace_revision
+            and self.sessions.get(session_name) is runtime
+        )
+
+    async def switch_workspace(self, workspace_root: Path) -> dict[str, Any]:
+        old_cache: McpToolCache | None = None
+        stale_runtimes: list[SessionRuntime] = []
+        async with self.workspace_lock, self.lock:
+            if workspace_root == self.workspace_root:
+                return self._status_wire_unlocked()
+            if any(runtime.running is not None for runtime in self.sessions.values()):
+                raise ApiError(409, "cannot switch workspace while a turn is running")
+            stale_runtimes = list(self.sessions.values())
+            old_cache = self.mcp_cache
+            self.mcp_cache = McpToolCache()
+            self.workspace_root = workspace_root
+            self.workspace_revision += 1
+            self.sessions = {}
+            status = self._status_wire_unlocked()
+
+        message = _workspace_changed_message(workspace_root)
+        for runtime in stale_runtimes:
+            runtime.broadcast(message)
+        if old_cache is not None:
+            await old_cache.aclose()
+        return status
 
     async def close(self) -> None:
         close = getattr(self.mcp_cache, "aclose", None) or getattr(self.mcp_cache, "close", None)
@@ -184,61 +271,92 @@ def create_app(options: ServerOptions) -> FastAPI:
 
     @app.get("/api/status")
     async def status() -> dict[str, Any]:
-        return {
-            "workspace_root": str(options.workspace_root),
-            "config_path": str(options.config_path),
-            "permissions": options.permissions.to_wire(),
-            "version": __version__,
-        }
+        return await state.status_wire()
+
+    @app.get("/api/workspaces/directory")
+    async def workspace_directory(
+        path: str | None = None,
+        show_hidden: bool = False,
+    ) -> dict[str, Any]:
+        _require_workspace_selection(state)
+        try:
+            return await asyncio.to_thread(_list_directory, path, show_hidden)
+        except (OSError, RuntimeError, ValueError) as error:
+            raise ApiError(400, str(error)) from error
+
+    @app.post("/api/workspaces/open")
+    async def open_workspace(request: WorkspaceOpenRequest) -> dict[str, Any]:
+        _require_workspace_selection(state)
+        if not request.path.strip():
+            raise ApiError(400, "workspace path must not be empty")
+        try:
+            workspace_root = await asyncio.to_thread(_resolve_directory, request.path)
+        except (OSError, RuntimeError, ValueError) as error:
+            raise ApiError(400, str(error)) from error
+        return await state.switch_workspace(workspace_root)
 
     @app.get("/api/sessions")
     async def list_sessions() -> list[dict[str, Any]]:
-        try:
-            store = SessionStore.for_current_dir(options.default_session_name)
-            entries = store.list_current_scope()
-        except SessionStoreError as error:
-            raise ApiError(500, str(error)) from error
+        async with state.workspace_lock:
+            async with state.lock:
+                workspace_root = state.workspace_root
+            try:
+                store = SessionStore.for_workspace(workspace_root, options.default_session_name)
+                entries = await asyncio.to_thread(store.list_current_scope)
+            except SessionStoreError as error:
+                raise ApiError(500, str(error)) from error
         return [_session_entry_wire(entry) for entry in entries]
 
     @app.get("/api/sessions/{name}")
     async def get_session(name: str) -> dict[str, Any]:
-        store = _session_store(name)
-        try:
-            session = store.load()
-        except SessionStoreError as error:
-            raise ApiError(500, str(error)) from error
+        async with state.workspace_lock:
+            async with state.lock:
+                workspace_root = state.workspace_root
+            store = _session_store(workspace_root, name)
+            try:
+                session = await asyncio.to_thread(store.load)
+            except SessionStoreError as error:
+                raise ApiError(500, str(error)) from error
         return SessionDocument.new(session).to_wire()
 
     @app.post("/api/sessions/{name}")
     async def create_session(name: str) -> dict[str, Any]:
-        if await state.running_snapshot(name) is not None:
-            raise ApiError(409, "session has a running turn")
-        store = _session_store(name)
-        try:
-            store.load_existing()
-        except SessionNotFound:
-            pass
-        except SessionStoreError as error:
-            raise ApiError(500, str(error)) from error
-        else:
-            raise ApiError(409, f"session {name!r} already exists")
-        session = Session.new()
-        try:
-            store.save(session)
-        except SessionStoreError as error:
-            raise ApiError(500, str(error)) from error
+        async with state.workspace_lock:
+            async with state.lock:
+                runtime = state.sessions.get(name)
+                if runtime is not None and runtime.running is not None:
+                    raise ApiError(409, "session has a running turn")
+                workspace_root = state.workspace_root
+            store = _session_store(workspace_root, name)
+            try:
+                await asyncio.to_thread(store.load_existing)
+            except SessionNotFound:
+                pass
+            except SessionStoreError as error:
+                raise ApiError(500, str(error)) from error
+            else:
+                raise ApiError(409, f"session {name!r} already exists")
+            session = Session.new()
+            try:
+                await asyncio.to_thread(store.save, session)
+            except SessionStoreError as error:
+                raise ApiError(500, str(error)) from error
         return SessionDocument.new(session).to_wire()
 
     @app.post("/api/sessions/{name}/reset")
     async def reset_session(name: str) -> dict[str, Any]:
-        if await state.running_snapshot(name) is not None:
-            raise ApiError(409, "session has a running turn")
-        store = _session_store(name)
-        session = Session.new()
-        try:
-            store.save(session)
-        except SessionStoreError as error:
-            raise ApiError(500, str(error)) from error
+        async with state.workspace_lock:
+            async with state.lock:
+                runtime = state.sessions.get(name)
+                if runtime is not None and runtime.running is not None:
+                    raise ApiError(409, "session has a running turn")
+                workspace_root = state.workspace_root
+            store = _session_store(workspace_root, name)
+            session = Session.new()
+            try:
+                await asyncio.to_thread(store.save, session)
+            except SessionStoreError as error:
+                raise ApiError(500, str(error)) from error
         return SessionDocument.new(session).to_wire()
 
     @app.websocket("/api/sessions/{name}/ws")
@@ -252,7 +370,7 @@ def create_app(options: ServerOptions) -> FastAPI:
         sender: asyncio.Task[None] | None = None
         try:
             try:
-                await websocket.send_json(await state.snapshot(name))
+                await websocket.send_json(await state.snapshot(name, runtime))
             except (ApiError, SessionStoreError, OSError, ValueError) as error:
                 await websocket.send_json(_error_message(str(error)))
                 return
@@ -300,6 +418,10 @@ async def _handle_client_message(
     session_name: str,
     message: Any,
 ) -> None:
+    async with state.lock:
+        if not state._runtime_is_current_unlocked(session_name, runtime):
+            runtime.broadcast(_workspace_changed_message(state.workspace_root))
+            return
     if not isinstance(message, dict) or not isinstance(message.get("type"), str):
         runtime.broadcast(_error_message("invalid websocket message"))
         return
@@ -348,20 +470,12 @@ async def _start_turn(
             }
         )
         return
-    try:
-        _session_store(session_name)
-    except ApiError as error:
-        runtime.broadcast(
-            {
-                "type": "turn_rejected",
-                "data": {"request_id": request_id, "reason": error.message},
-            }
-        )
-        return
-
     cancellation = CancellationToken()
     turn_id = f"turn-{timestamp_ms()}"
-    async with state.lock:
+    async with state.workspace_lock, state.lock:
+        if not state._runtime_is_current_unlocked(session_name, runtime):
+            runtime.broadcast(_workspace_changed_message(state.workspace_root))
+            return
         if runtime.running is not None:
             runtime.broadcast(
                 {
@@ -373,8 +487,29 @@ async def _start_turn(
                 }
             )
             return
+        workspace_root = state.workspace_root
+        mcp_cache = state.mcp_cache
+        try:
+            _session_store(workspace_root, session_name)
+        except ApiError as error:
+            runtime.broadcast(
+                {
+                    "type": "turn_rejected",
+                    "data": {"request_id": request_id, "reason": error.message},
+                }
+            )
+            return
         worker = asyncio.create_task(
-            _run_turn_task(state, runtime, session_name, turn_id, prompt, cancellation)
+            _run_turn_task(
+                state,
+                runtime,
+                session_name,
+                turn_id,
+                prompt,
+                cancellation,
+                workspace_root,
+                mcp_cache,
+            )
         )
         runtime.running = RunningTurn(
             turn_id=turn_id,
@@ -383,7 +518,7 @@ async def _start_turn(
         )
         asyncio.create_task(_supervise_turn(state, runtime, session_name, turn_id, worker))
 
-    runtime.broadcast(await state.snapshot(session_name))
+    runtime.broadcast(await state.snapshot(session_name, runtime))
 
 
 async def _run_turn_task(
@@ -393,9 +528,11 @@ async def _run_turn_task(
     turn_id: str,
     prompt: str,
     cancellation: CancellationToken,
+    workspace_root: Path,
+    mcp_cache: McpToolCache,
 ) -> None:
     try:
-        store = SessionStore.for_current_dir(session_name)
+        store = SessionStore.for_workspace(workspace_root, session_name)
         session = store.load()
         turn_index = len(session.turns)
         handler = ServerTurnHandler(state, runtime, session_name, turn_id)
@@ -405,11 +542,11 @@ async def _run_turn_task(
                 system_prompt=state.options.system_prompt,
                 context_config=state.options.context_config,
                 model_limits=state.options.model_limits,
-                workspace_root=state.options.workspace_root,
+                workspace_root=workspace_root,
                 permissions=state.options.permissions,
                 mcp_servers=state.options.mcp_servers,
                 plc_subagents=state.options.plc_subagents,
-                mcp_cache=state.mcp_cache,
+                mcp_cache=mcp_cache,
                 session_name=session_name,
                 turn_index=turn_index,
             ),
@@ -567,9 +704,9 @@ class ServerTurnHandler(TurnEventHandler):
             return ApprovalDecision.deny(request.id)
 
 
-def _session_store(name: str) -> SessionStore:
+def _session_store(workspace_root: Path, name: str) -> SessionStore:
     try:
-        return SessionStore.for_current_dir(name)
+        return SessionStore.for_workspace(workspace_root, name)
     except (SessionStoreError, ValueError) as error:
         raise ApiError(400, str(error)) from error
 
@@ -587,6 +724,79 @@ def _session_entry_wire(entry: SessionEntry) -> dict[str, Any]:
 
 def _error_message(message: str) -> dict[str, Any]:
     return {"type": "error", "data": {"message": message}}
+
+
+def _workspace_changed_message(workspace_root: Path) -> dict[str, Any]:
+    return {
+        "type": "workspace_changed",
+        "data": {"workspace_root": str(workspace_root)},
+    }
+
+
+def _require_workspace_selection(state: ServerState) -> None:
+    if not state.workspace_selection_enabled:
+        raise ApiError(403, "workspace selection is available only on loopback hosts")
+
+
+def _host_is_loopback(host: str) -> bool:
+    normalized = host.strip().rstrip(".").lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _resolve_directory(path: str | Path) -> Path:
+    candidate = Path(path).expanduser()
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as error:
+        raise ValueError(f"failed to resolve {candidate}: {error}") from error
+    if not resolved.is_dir():
+        raise ValueError(f"{resolved} is not a directory")
+    return resolved
+
+
+def _list_directory(path: str | None, show_hidden: bool) -> dict[str, Any]:
+    if path is None or not path.strip():
+        try:
+            candidate = Path.home()
+        except RuntimeError as error:
+            raise ValueError("home directory was not found") from error
+    else:
+        candidate = Path(path)
+    directory = _resolve_directory(candidate)
+    try:
+        children = list(directory.iterdir())
+    except OSError as error:
+        raise ValueError(f"failed to list {directory}: {error}") from error
+
+    entries: list[dict[str, Any]] = []
+    for child in children:
+        hidden = child.name.startswith(".")
+        if hidden and not show_hidden:
+            continue
+        try:
+            is_directory = child.is_dir()
+        except OSError:
+            continue
+        entries.append(
+            {
+                "name": child.name,
+                "path": str(child),
+                "directory": is_directory,
+                "hidden": hidden,
+            }
+        )
+    entries.sort(key=lambda entry: (not entry["directory"], entry["name"].casefold()))
+    parent = directory.parent
+    return {
+        "path": str(directory),
+        "parent": None if parent == directory else str(parent),
+        "entries": entries,
+    }
 
 
 def _websocket_origin_allowed(websocket: WebSocket) -> bool:

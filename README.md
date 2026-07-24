@@ -98,6 +98,17 @@ The dashboard defaults to `127.0.0.1:3000`. Browser WebSockets are restricted to
 origin, but the service is otherwise intentionally local and unauthenticated; do not expose it
 publicly without an external security layer.
 
+When the server is bound to `localhost` or a loopback IP, the dashboard's **Projects** picker can
+browse local directories and switch the active workspace. Sessions, built-in tools, shell working
+directories, sandbox boundaries, and relative MCP working directories follow the selected
+workspace. A running turn must be stopped before switching. The model, permissions, MCP
+configuration, and `morrow.toml` loaded at server startup are not reloaded during a switch.
+
+Directory browsing and workspace switching are disabled when the server is bound to a non-loopback
+address because the dashboard has no built-in authentication and those APIs expose filesystem
+metadata. The selected workspace is process-local; restarting the server restores the workspace
+detected from its launch directory. Recent workspace paths are stored only in browser localStorage.
+
 ## Frontend development
 
 ```bash
